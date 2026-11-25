@@ -17,7 +17,7 @@ from glob import glob as glob_files
 from typing import List, Optional, Dict, Any
 from collections import defaultdict
 from .server import FAISSVectorStore
-from .document_parser import parse_document
+from .document_parser import parse_document, parse_pdf_pages
 from .colors import success, error, info, warning
 from .progress import create_file_progress, update_progress_description, progress_print
 
@@ -244,11 +244,17 @@ def cmd_index(args):
             update_progress_description(files_iter, file_path, "Indexing")
             progress_print(f"📄 Indexing: {file_path}", show_progress)
 
-            # Parse document
-            document_text = parse_document(file_path)
-
             # Ingest into vector store (adds to existing index)
-            result = vector_store.ingest(document_text, source=str(file_path))
+            if file_path.suffix.lower() == ".pdf":
+                result = vector_store.ingest(
+                    "",
+                    source=str(file_path),
+                    pages=parse_pdf_pages(file_path),
+                    metadata={"local_path": str(file_path.resolve())},
+                )
+            else:
+                document_text = parse_document(file_path)
+                result = vector_store.ingest(document_text, source=str(file_path))
 
             if result["success"]:
                 chunks_added = result["chunks_added"]

@@ -23,6 +23,25 @@ def parse_text_file(file_path: Path) -> str:
         return file_path.read_text(encoding='latin-1')
 
 
+def parse_pdf_pages(file_path: Path) -> list[dict]:
+    """Extract pages without inferring printed numbers from PDF indices.
+
+    Explicit PDF page labels are retained as labels, not claimed printed numbers.
+    Callers can supply verified printed-page and section metadata via pages input.
+    """
+    reader = PdfReader(file_path)
+    labels = reader.page_labels if "/PageLabels" in reader.trailer["/Root"] else None
+    units = []
+    for number, page in enumerate(reader.pages, 1):
+        text = page.extract_text()
+        if text and text.strip():
+            metadata = {"pdf_page": number}
+            if labels:
+                metadata["pdf_page_label"] = labels[number - 1]
+            units.append({"text": text, "metadata": metadata})
+    return units
+
+
 def parse_pdf(file_path: Path) -> str:
     """Parse PDF files using pypdf."""
     reader = PdfReader(file_path)

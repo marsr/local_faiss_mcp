@@ -18,7 +18,7 @@ from sentence_transformers import SentenceTransformer, CrossEncoder
 from mcp.server import Server
 from mcp.types import Tool, TextContent, Prompt, PromptMessage, PromptArgument
 from mcp.server.stdio import stdio_server
-from .document_parser import parse_document, is_file_path
+from .document_parser import parse_document, is_file_path, parse_pdf_pages
 
 
 class FAISSVectorStore:
@@ -162,10 +162,18 @@ class FAISSVectorStore:
             "text_preview": new_text[:200],
         }
 
-    def ingest(self, document: str, source: str = "unknown") -> dict[str, Any]:
+    def ingest(self, document: str, source: str = "unknown",
+               metadata: dict | None = None, pages: list[dict] | None = None) -> dict[str, Any]:
         """Ingest a document into the vector store."""
         # Chunk the document
-        chunks = self.chunk_text(document)
+        # Chunk each supplied page/section separately; never lose its provenance.
+        units = pages if pages is not None else [{"text": document}]
+        chunks, locations = [], []
+        for unit in units:
+            location = {**(metadata or {}), **unit.get("metadata", {})}
+            for chunk in self.chunk_text(unit["text"]):
+                chunks.append(chunk)
+                locations.append(location.copy())
 
         if not chunks:
             return {"success": False, "error": "No chunks created from document"}
@@ -184,7 +192,8 @@ class FAISSVectorStore:
                 "id": start_idx + i,
                 "source": source,
                 "text": chunk,
-                "indexed_at": indexed_at
+                "indexed_at": indexed_at,
+                "metadata": locations[i]
             })
 
         # Save to disk
@@ -222,6 +231,7 @@ class FAISSVectorStore:
                 candidates.append({
                     "text": doc["text"],
                     "source": doc["source"],
+                    "metadata": doc.get("metadata", {}),
                     "distance": float(dist)
                 })
 
@@ -274,13 +284,24 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "The text content of the document to ingest"
                     },
+                    "metadata": {
+                        "type": "object",
+                        "description": "Shared provenance: title, edition, section, source_url, local_path, printed_page or printed_page_start/end, pdf_page or pdf_page_start/end. No locations are inferred from prose."
+                    },
+                    "pages": {
+                        "type": "array", "minItems": 1,
+                        "description": "Page or section units, chunked independently. Unit metadata overrides shared metadata. PDF pages are one-based; use page ranges for sections spanning pages.",
+                        "items": {"type": "object", "required": ["text"],
+                                  "properties": {"text": {"type": "string"},
+                                                 "metadata": {"type": "object"}}}
+                    },
                     "source": {
                         "type": "string",
                         "description": "Optional source identifier for the document (e.g., filename, URL)",
                         "default": "unknown"
                     }
                 },
-                "required": ["document"]
+                "anyOf": [{"required": ["document"]}, {"required": ["pages"]}]
             }
         ),
         Tool(
@@ -417,20 +438,40 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
     elif name == "ingest_document":
         document = arguments.get("document")
-        source = arguments.get("source", "memory" if name == "remember_force" else "unknown")
+        source = arguments.get("source", "unknown")
+
+        metadata = arguments.get("metadata", {})
+        pages = arguments.get("pages")
+        if not isinstance(metadata, dict) or (pages is not None and (
+            not isinstance(pages, list) or not pages or any(
+                not isinstance(u, dict) or not isinstance(u.get("text"), str)
+                or not isinstance(u.get("metadata", {}), dict) for u in pages))):
+            return [TextContent(type="text", text="Invalid metadata or pages")]
+        if pages is not None and document is not None:
+            return [TextContent(type="text", text="Supply document or pages, not both")]
+        if pages is None and not isinstance(document, str):
+            return [TextContent(type="text", text="Supply document text/path or pages")]
 
         # Auto-detect if document is a file path
-        if is_file_path(document):
+        if pages is None and is_file_path(document):
             try:
                 file_path = Path(document)
-                document_text = parse_document(file_path)
+                # Parse the document file
+                if file_path.suffix.lower() == ".pdf":
+                    pages = parse_pdf_pages(file_path)
+                    document_text = ""
+                    metadata = {**metadata, "local_path": str(file_path.resolve())}
+                else:
+                    document_text = parse_document(file_path)
+                # Use filename as source if not specified
                 if source == "unknown":
                     source = file_path.name
                 document = document_text
             except Exception as e:
                 return [TextContent(type="text", text=f"Failed to parse document: {str(e)}")]
 
-        result = vector_store.ingest(document, source)
+        result = vector_store.ingest(document or "", source, metadata=metadata, pages=pages)
+
         if result["success"]:
             message = f"Stored in memory (source: '{source}'). {result['chunks_added']} chunk(s) added."
         else:
@@ -449,10 +490,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             message = f"Found {len(results)} relevant chunks:\n\n"
             for i, result in enumerate(results, 1):
                 message += f"{i}. Source: {result['source']}\n"
+                location = result.get("metadata", {})
+                if location:
+                    message += f"   Provenance: {json.dumps(location, ensure_ascii=False)}\n"
+                    url = location.get("source_url")
+                    page = location.get("pdf_page", location.get("pdf_page_start"))
+                    if isinstance(url, str) and isinstance(page, int) and page > 0:
+                        message += f"   Reference: {url.split('#')[0]}#page={page}\n"
                 message += f"   Distance: {result['distance']:.4f}\n"
                 if 'rerank_score' in result:
                     message += f"   Rerank Score: {result['rerank_score']:.4f}\n"
-                message += f"   Text: {result['text'][:200]}...\n\n"
+                message += f"   Text: {result['text']}\n\n"
 
         return [TextContent(type="text", text=message)]
 
@@ -591,6 +639,7 @@ Retrieved Document Chunks:
                 prompt_text += f"""
 ---
 **Chunk {i}** (Source: {source}, Relevance Score: {distance:.4f})
+Provenance: {json.dumps(chunk.get("metadata", {}), ensure_ascii=False)}
 {text}
 """
 
@@ -635,6 +684,7 @@ Document Chunks:
                 prompt_text += f"""
 ---
 **Source {i}:** {source}
+Provenance: {json.dumps(chunk.get("metadata", {}), ensure_ascii=False)}
 {text}
 """
 

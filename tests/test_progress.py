@@ -27,7 +27,7 @@ class TestProgressBar:
             'index_dir': '/tmp/test_index',
             'embed_model': 'test-model'
         }
-        files = ['file1.pdf', 'file2.pdf', 'file3.pdf']
+        files = [Path('file1.txt'), Path('file2.txt'), Path('file3.txt')]
         mock_collect.return_value = files
         
         mock_store = MagicMock()
@@ -68,7 +68,7 @@ class TestProgressBar:
             'index_dir': '/tmp/test_index',
             'embed_model': 'test-model'
         }
-        files = ['file1.pdf']
+        files = [Path('file1.txt')]
         mock_collect.return_value = files
         
         mock_store = MagicMock()

@@ -17,7 +17,7 @@ from glob import glob as glob_files
 from typing import List, Optional, Dict, Any
 from collections import defaultdict
 from .server import FAISSVectorStore
-from .document_parser import parse_document, parse_pdf_pages
+from .document_parser import parse_document, parse_pdf_pages, is_supported_file
 from .colors import success, error, info, warning
 from .progress import create_file_progress, update_progress_description, progress_print
 
@@ -41,17 +41,43 @@ def find_mcp_config() -> Optional[Path]:
 
     # 2. Search home directory for any .*/mcp.json
     home = Path.home()
-    for config_path in home.glob('*/mcp.json'):
-        # Check it's a hidden directory (starts with .)
-        if config_path.parent.name.startswith('.'):
-            return config_path
+    try:
+        home_children = list(home.iterdir())
+    except OSError as e:
+        print(warning(f"Skipping inaccessible home config scan: {e}"), file=sys.stderr)
+        home_children = []
+
+    for candidate in home_children:
+        if not candidate.name.startswith('.'):
+            continue
+        config_path = candidate / 'mcp.json'
+        try:
+            if config_path.exists():
+                return config_path
+        except OSError as e:
+            print(warning(f"Skipping inaccessible MCP config candidate {config_path}: {e}"), file=sys.stderr)
+            continue
 
     # 3. Fallback to ~/.mcp.json
     fallback_config = home / '.mcp.json'
-    if fallback_config.exists():
-        return fallback_config
+    try:
+        if fallback_config.exists():
+            return fallback_config
+    except OSError as e:
+        print(warning(f"Skipping inaccessible MCP config candidate {fallback_config}: {e}"), file=sys.stderr)
 
     return None
+
+
+def filter_supported_files(files: List[Path]) -> List[Path]:
+    """Keep only files that the parser can explicitly handle."""
+    supported = []
+    for file_path in files:
+        if is_supported_file(file_path):
+            supported.append(file_path)
+        else:
+            print(warning(f"Skipping unsupported file type: {file_path}"), file=sys.stderr)
+    return supported
 
 
 def read_mcp_config(config_path: Path) -> Dict[str, Any]:
@@ -191,7 +217,7 @@ def collect_files(patterns: List[str], recursive: bool = False) -> List[Path]:
             print(warning(f"Path not found: {pattern}"), file=sys.stderr)
 
     # Remove duplicates and sort
-    unique_files = sorted(set(files))
+    unique_files = filter_supported_files(sorted(set(files)))
     return unique_files
 
 

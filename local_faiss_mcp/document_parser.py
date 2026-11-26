@@ -9,9 +9,26 @@ Supports:
 
 import subprocess
 import shutil
+import re
+import warnings
 from pathlib import Path
 from typing import Optional
 from pypdf import PdfReader
+
+NATIVE_EXTENSIONS = {'.txt', '.md', '.rst', '.log', '.pdf'}
+PANDOC_EXTENSIONS = {'.docx', '.odt', '.html', '.htm', '.rtf', '.epub', '.org', '.tex'}
+SUPPORTED_EXTENSIONS = NATIVE_EXTENSIONS | PANDOC_EXTENSIONS
+_SUSPICIOUS_GID_RE = re.compile(r'(?:/gid\d{4,}){3,}')
+
+
+def is_supported_file(file_path: str | Path) -> bool:
+    """Return whether the parser has an explicit path for this file type."""
+    return Path(file_path).suffix.lower() in SUPPORTED_EXTENSIONS
+
+
+def has_suspicious_gid_text(text: str) -> bool:
+    """Detect strongly suspicious literal /gidNNNN glyph placeholder runs."""
+    return bool(_SUSPICIOUS_GID_RE.search(text))
 
 
 def parse_text_file(file_path: Path) -> str:
@@ -35,6 +52,13 @@ def parse_pdf_pages(file_path: Path) -> list[dict]:
     for number, page in enumerate(reader.pages, 1):
         text = page.extract_text()
         if text and text.strip():
+            if has_suspicious_gid_text(text):
+                warnings.warn(
+                    f"Suspicious PDF text extraction in {file_path} page {number}: "
+                    "contains repeated /gidNNNN glyph placeholders; text indexed unchanged.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             metadata = {"pdf_page": number}
             if labels:
                 metadata["pdf_page_label"] = labels[number - 1]
@@ -107,14 +131,14 @@ def parse_document(file_path: str | Path) -> str:
     ext = file_path.suffix.lower()
 
     # Native parsers
-    if ext in ['.txt', '.md', '.rst', '.log']:
+    if ext in NATIVE_EXTENSIONS - {'.pdf'}:
         return parse_text_file(file_path)
 
     elif ext == '.pdf':
         return parse_pdf(file_path)
 
     # Pandoc fallback for other formats
-    elif ext in ['.docx', '.odt', '.html', '.htm', '.rtf', '.epub', '.org', '.tex']:
+    elif ext in PANDOC_EXTENSIONS:
         return parse_with_pandoc(file_path)
 
     # Unknown format - try pandoc if available
